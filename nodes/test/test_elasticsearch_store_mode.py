@@ -5,11 +5,12 @@ Covers:
 - Integration tests for IGlobal._begin_elasticsearch key-selection and fallback logic
 """
 
-import pytest
+import sys
+import types
 from unittest.mock import MagicMock, patch
 
-from nodes.index_search.IGlobal import _parse_mode_elasticsearch
-from nodes.index_search.constants import MODE_INDEX, MODE_VSTORE
+from nodes.store_elasticsearch.IGlobal import _parse_mode_elasticsearch
+from nodes.store_elasticsearch.constants import MODE_INDEX, MODE_VSTORE
 
 
 # ---------------------------------------------------------------------------
@@ -53,7 +54,7 @@ def test_parse_mode_elasticsearch():
 
 def _make_iglobal():
     """Return a minimally configured IGlobal instance with I/O dependencies mocked."""
-    from nodes.index_search.IGlobal import IGlobal
+    from nodes.store_elasticsearch.IGlobal import IGlobal
 
     glb = IGlobal.__new__(IGlobal)
     glb.glb = MagicMock()
@@ -76,8 +77,16 @@ def _run_begin_elasticsearch(connConfig):
     mock_store.port = 9200
     mock_store.index = 'test-index'
 
-    with patch('nodes.index_search.IGlobal.IGlobalTransform.beginGlobal', return_value=None), \
-         patch('nodes.index_search.elasticsearch_store.Store', return_value=mock_store):
+    # _begin_elasticsearch imports Store lazily. Seeding the submodule in
+    # sys.modules satisfies that import without loading the real client, which
+    # is a runtime dependency this suite has no reason to need.
+    stub = types.ModuleType('nodes.store_elasticsearch.elasticsearch_store')
+    stub.Store = MagicMock(return_value=mock_store)
+
+    with (
+        patch.dict(sys.modules, {'nodes.store_elasticsearch.elasticsearch_store': stub}),
+        patch('nodes.store_elasticsearch.IGlobal.IGlobalTransform.beginGlobal', return_value=None),
+    ):
         glb._begin_elasticsearch(connConfig, {})
 
     return glb
@@ -93,9 +102,7 @@ def test_begin_elasticsearch_store_mode_false_wins_over_legacy_self_managed():
     take precedence.
     """
     glb = _run_begin_elasticsearch({'store_mode': False, 'mode': 'self-managed'})
-    assert glb.mode == MODE_INDEX, (
-        "store_mode=False must resolve to MODE_INDEX even when legacy mode='self-managed'"
-    )
+    assert glb.mode == MODE_INDEX, "store_mode=False must resolve to MODE_INDEX even when legacy mode='self-managed'"
 
 
 def test_begin_elasticsearch_store_mode_true_gives_vstore():
@@ -132,9 +139,7 @@ def test_begin_elasticsearch_fallback_legacy_string_self_managed():
     map to MODE_VSTORE through the _parse_mode_elasticsearch fallback.
     """
     glb = _run_begin_elasticsearch({'mode': 'self-managed'})
-    assert glb.mode == MODE_VSTORE, (
-        "Legacy deployment-profile 'self-managed' should map to MODE_VSTORE"
-    )
+    assert glb.mode == MODE_VSTORE, "Legacy deployment-profile 'self-managed' should map to MODE_VSTORE"
 
 
 def test_begin_elasticsearch_fallback_legacy_string_index():
@@ -154,9 +159,7 @@ def test_begin_elasticsearch_store_mode_wins_over_all_legacy_variants():
     """
     for legacy_mode in [True, 'self-managed', False]:
         glb = _run_begin_elasticsearch({'store_mode': False, 'mode': legacy_mode})
-        assert glb.mode == MODE_INDEX, (
-            f"store_mode=False must win over legacy mode={legacy_mode!r}; got {glb.mode}"
-        )
+        assert glb.mode == MODE_INDEX, f'store_mode=False must win over legacy mode={legacy_mode!r}; got {glb.mode}'
 
 
 # -- Edge case: neither key present → default to MODE_VSTORE --
